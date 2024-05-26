@@ -60,14 +60,16 @@ public class Constant {
     public static final String DESC_REGEX = "(?:(?:[VZBCDFIJS])|" + CLASS_DESC + "|" + ARRAY_DESC + ")";
     public static final Pattern DESC_PATTERN = Pattern.compile(DESC_REGEX);
     // magic header.
-    protected static final short MAGIC = (short) 0xdabb;
-    protected static final byte MAGIC_0 = (byte) (MAGIC >>> 8);
-    protected static final byte MAGIC_1 = (byte) MAGIC;
+    public static final short MAGIC = (short) 0xdabb;
+    public static final byte MAGIC_0 = (byte) (MAGIC >>> 8);
+    public static final byte MAGIC_1 = (byte) MAGIC;
     // message flag.
-    protected static final byte FLAG_REQUEST = (byte) 0x80;
-    //    protected static final byte FLAG_TWOWAY = (byte) 0x40;
-    protected static final byte FLAG_EVENT = (byte) 0x20;
-    protected static final int SERIALIZATION_MASK = 0x1f;
+    public static final byte FLAG_REQUEST = (byte) 0x80;
+    public static final byte FLAG_TWOWAY = (byte) 0x40;
+    public static final byte FLAG_EVENT = (byte) 0x20;
+    public static final int SERIALIZATION_MASK = 0x1f;
+
+    public static final byte SERIALIZATION_ID = 2;
 
     public static int countArgs(String desc) {
         int length = desc.length();
