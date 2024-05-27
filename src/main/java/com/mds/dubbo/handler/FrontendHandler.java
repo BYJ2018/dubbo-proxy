@@ -4,6 +4,8 @@ import com.mds.dubbo.codec.packet.BodyHeartBeat;
 import com.mds.dubbo.codec.packet.BodyRequest;
 import com.mds.dubbo.codec.packet.DubboPacket;
 import com.mds.dubbo.config.AppInfo;
+import com.mds.dubbo.session.ConnectionInfo;
+import com.mds.dubbo.session.ConnectionManager;
 import com.mds.dubbo.session.SessionManager;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -15,6 +17,7 @@ import io.netty.util.HashedWheelTimer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.dubbo.remoting.transport.netty4.NettyEventLoopFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -32,14 +35,6 @@ public class FrontendHandler extends ChannelInboundHandlerAdapter {
 
     private final HashedWheelTimer timer = new HashedWheelTimer();
 
-    private final Map<String,Channel> readyMap = new ConcurrentHashMap<>(16);
-
-    private final Map<Channel, AppInfo> map = new ConcurrentHashMap<>(16);
-
-    private final List<AppInfo> retryList = new CopyOnWriteArrayList<>();
-
-
-
     public FrontendHandler(List<AppInfo> appInfoList) {
         this.appInfoList = appInfoList;
     }
@@ -53,28 +48,50 @@ public class FrontendHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         Channel inboundChannel = ctx.channel();
+        List<ConnectionInfo> connectionInfoList = new ArrayList<>(appInfoList.size());
+        List<AppInfo> retryList = new ArrayList<>(appInfoList.size());
         for (AppInfo appInfo : appInfoList) {
-            connect(appInfo, inboundChannel);
+            ChannelFuture channelFuture = connect(appInfo, inboundChannel);
+            channelFuture.addListener((ChannelFutureListener) future -> {
+                if (future.isSuccess()) {
+                    log.info("remote {} connect success", inboundChannel.remoteAddress());
+                    inboundChannel.read();
+                    ConnectionInfo connectionInfo = new ConnectionInfo();
+                    connectionInfo.setChannel(future.channel());
+                    connectionInfo.setAppInfo(appInfo);
+                    connectionInfoList.add(connectionInfo);
+                } else {
+                    // 暂存,定时重连重连。
+                    log.warn("connect fail {}", appInfo);
+                    /*inboundChannel.close();*/
+                    retryList.add(appInfo);
+                }
+            });
         }
+        ConnectionManager connectionManager = ConnectionManager.getInstance();
+        connectionManager.addConnection(inboundChannel, connectionInfoList);
+        connectionManager.retryQueue(inboundChannel, retryList);
         heartbeat(inboundChannel);
     }
 
     private void heartbeat(Channel inboundChannel) {
+        ConnectionManager connectionManager = ConnectionManager.getInstance();
         timer.newTimeout(timeout -> {
-            for (Channel channel : readyMap.values()) {
-                ByteBuf buffer = heartbeatPacket();
+            if (!connectionManager.exist(inboundChannel)) {
+                return;
+            }
+            List<ConnectionInfo> connectionInfoList = connectionManager.getConnectionInfo(inboundChannel);
+            for (ConnectionInfo connectionInfo : connectionInfoList) {
+                Channel channel = connectionInfo.getChannel();
                 if (channel.isActive()) {
+                    ByteBuf buffer = heartbeatPacket();
                     log.warn("send heartbeat: {}", channel);
                     channel.writeAndFlush(buffer);
                 } else {
-                    // 重试队列
-                    AppInfo appInfo = map.get(channel);
-                    if (Objects.isNull(appInfo)) {
-                        break;
-                    }
-                    connect(appInfo, inboundChannel);
+                    log.warn("重试");
                 }
             }
+            heartbeat(inboundChannel);
         }, 10, TimeUnit.SECONDS);
     }
 
@@ -90,26 +107,13 @@ public class FrontendHandler extends ChannelInboundHandlerAdapter {
         return buffer;
     }
 
-    private void connect(AppInfo appInfo, Channel inboundChannel) {
+    private ChannelFuture connect(AppInfo appInfo, Channel inboundChannel) {
         Bootstrap b = new Bootstrap();
         b.group(inboundChannel.eventLoop());
         b.option(ChannelOption.AUTO_READ, true)
                 .channel(NettyEventLoopFactory.socketChannelClass())
                 .handler(new BackendHandler(inboundChannel));
-        ChannelFuture channelFuture = b.connect(appInfo.getIp(), appInfo.getPort());
-        channelFuture.addListener((ChannelFutureListener) future -> {
-            if (future.isSuccess()) {
-                log.info("remote {} connect success", inboundChannel.remoteAddress());
-                inboundChannel.read();
-                readyMap.put(appInfo.getName(),channelFuture.channel());
-                map.put(channelFuture.channel(), appInfo);
-            } else {
-                // 暂存,定时重连重连。
-                log.warn("connect fail {}", appInfo);
-                /*inboundChannel.close();*/
-                retryList.add(appInfo);
-            }
-        });
+        return b.connect(appInfo.getIp(), appInfo.getPort());
     }
 
     @Override
@@ -122,7 +126,9 @@ public class FrontendHandler extends ChannelInboundHandlerAdapter {
                 if (body instanceof BodyRequest) {
                     BodyRequest bodyRequest = (BodyRequest) body;
                     String dubboApplication = bodyRequest.getAttachments().get("target-application").toString();
-                    Channel channel = readyMap.get(dubboApplication);
+                    ConnectionManager connectionManager = ConnectionManager.getInstance();
+                    List<ConnectionInfo> connectionInfo = connectionManager.getConnectionInfo(ctx.channel());
+                    Channel channel = connectionInfo.stream().filter(x -> x.getAppInfo().getName().equals(dubboApplication)).map(ConnectionInfo::getChannel).findFirst().orElse(null);
                     if (channel.isActive()) {
                         // 获取ByteBufAllocator用于创建新的ByteBuf
                         CompositeByteBuf compositeByteBuf = Unpooled.compositeBuffer();
