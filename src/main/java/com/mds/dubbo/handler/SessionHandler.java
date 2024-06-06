@@ -62,7 +62,8 @@ public class SessionHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-        super.channelRead(ctx, msg);
+        log.info("SessionHandler channelRead  msg {}",msg);
+        ctx.fireChannelRead(msg);
     }
 
     @Override
