@@ -25,12 +25,6 @@ import static com.mds.dubbo.codec.Constant.OK;
 @Slf4j
 public class BackendHandler extends ChannelInboundHandlerAdapter {
 
-    private final Channel inboundChannel;
-
-    public BackendHandler(Channel inboundChannel) {
-        this.inboundChannel = inboundChannel;
-    }
-
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         ctx.read();
@@ -43,15 +37,13 @@ public class BackendHandler extends ChannelInboundHandlerAdapter {
             ByteBuf byteBuf = (ByteBuf) msg;
             byte flag = byteBuf.getByte(2);
             byte status = byteBuf.getByte(3);
-            long requestId = byteBuf.getLong(4);
-            // 8 - 1-request/0-response
-            byte type = byteBuf.getByte(8);
-            int bodyLength = byteBuf.getInt(12);
             if (status == OK) {
                 // 这里的判断不太严谨，需要根据序列化的方式然后判断第17位是不是null result
                 if ((flag & FLAG_EVENT) != 0) {
                     log.warn("接收到provider的心跳响应{}", msg);
                 } else {
+                    ConnectionManager connectionManager = ConnectionManager.getInstance();
+                    Channel inboundChannel = connectionManager.getInboundChannel(ctx.channel());
                     inboundChannel.writeAndFlush(msg).addListener((ChannelFutureListener) future -> {
                         if (future.isSuccess()) {
                             ctx.channel().read();
@@ -61,12 +53,13 @@ public class BackendHandler extends ChannelInboundHandlerAdapter {
                     });
                 }
             }
-
         }
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        ConnectionManager connectionManager = ConnectionManager.getInstance();
+        Channel inboundChannel = connectionManager.getInboundChannel(ctx.channel());
         FrontendHandler.closeOnFlush(inboundChannel);
     }
 

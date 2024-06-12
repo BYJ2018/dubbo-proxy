@@ -1,5 +1,6 @@
 package com.mds.dubbo.handler;
 
+import com.mds.dubbo.session.ConnectionManager;
 import com.mds.dubbo.session.SessionManager;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -72,6 +73,8 @@ public class SessionHandler extends ChannelInboundHandlerAdapter {
         log.info("SessionHandler channel is inActive: {}, id：{}", channel.remoteAddress(), channel.id().asLongText());
         SessionManager sessionManager = SessionManager.getInstance();
         sessionManager.removeSession(channel);
+        ConnectionManager connectionManager = ConnectionManager.getInstance();
+        connectionManager.removeChannel(channel);
         timer.stop();
     }
 }

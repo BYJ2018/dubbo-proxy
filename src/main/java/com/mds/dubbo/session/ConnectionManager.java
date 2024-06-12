@@ -1,16 +1,14 @@
 package com.mds.dubbo.session;
 
 import com.mds.dubbo.config.AppInfo;
+import com.sun.jmx.remote.internal.ArrayQueue;
 import io.netty.channel.Channel;
 
-import java.util.Collection;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 链接管理器
@@ -21,19 +19,26 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class ConnectionManager {
 
     /**
-     * consumer channel和provider信息
+     * 维护 客户端的inboundChannel 和各个 后端真实服务间的channel 映射
      */
-    private final Map<Channel, List<ConnectionInfo>> connectionRegistry =
-            new ConcurrentHashMap<>();
+    private final Map<Channel, List<Channel>> clientToServerChannelMap = new ConcurrentHashMap<>(16);
 
+    /**
+     * 维护各个真实服务与客户端channel的映射
+     */
+    private final Map<Channel, Channel> serverToClientChannelMap = new ConcurrentHashMap<>(16);
 
+    /**
+     * 维护服务端channel 和 真实服务间的链接信息
+     */
+    private final Map<Channel, AppInfo> channelAppInfoMap = new ConcurrentHashMap<>(16);
 
     private final Map<String,Channel> readyMap = new ConcurrentHashMap<>(16);
 
     /**
      * 重试
      */
-    private final Map<Channel, List<AppInfo>> retryMap = new ConcurrentHashMap<>();
+    private final Queue<Channel> retryMap = new LinkedBlockingQueue<>(100);
 
 
     private ConnectionManager() {
@@ -44,6 +49,21 @@ public class ConnectionManager {
         return readyMap.get(appName);
     }
 
+    /**
+     * 如果client与proxy的链接已经断开了， 需要将与后端真实服务建立的关系移除，链接关闭
+     * @param channel 入栈通道
+     */
+    public void removeChannel(Channel channel) {
+        clientToServerChannelMap.get(channel).forEach(c -> {
+            AppInfo appInfo = channelAppInfoMap.get(c);
+            readyMap.remove(appInfo.getName());
+            channelAppInfoMap.remove(c);
+            c.close();
+        });
+        serverToClientChannelMap.entrySet().removeIf(channelEntry -> channelEntry.getValue() == channel);
+        clientToServerChannelMap.remove(channel);
+    }
+
     private static class Singleton {
         static ConnectionManager instance = new ConnectionManager();
     }
@@ -52,24 +72,37 @@ public class ConnectionManager {
         return ConnectionManager.Singleton.instance;
     }
 
-    public void addConnection(String appName, Channel channel) {
-        readyMap.put(appName, channel);
+    public void addConnection(AppInfo appInfo, Channel channel, Channel inboundChannel) {
+        // 插入 client channel 和 server channel
+        clientToServerChannelMap.computeIfAbsent(inboundChannel, k -> new ArrayList<>()).add(channel);
+        // 插入 server channel 对应的 client channel
+        serverToClientChannelMap.put(channel, inboundChannel);
+        readyMap.put(appInfo.getName(), channel);
+        channelAppInfoMap.put(channel, appInfo);
+    }
+
+    public AppInfo getAppInfo(Channel channel) {
+        return channelAppInfoMap.get(channel);
     }
 
     public Collection<Channel> connection() {
         return readyMap.values();
     }
 
-    public void retryQueue(Channel channel, List<AppInfo> appInfoList) {
-        retryMap.put(channel, appInfoList);
+    public Channel getInboundChannel(Channel channel) {
+        return serverToClientChannelMap.get(channel);
     }
 
-    public List<AppInfo> getQueue(Channel channel) {
-        return retryMap.get(channel);
+    public void retryQueue(Channel channel) {
+        retryMap.offer(channel);
     }
 
-    public boolean exist(Channel channel) {
-        return connectionRegistry.containsKey(channel);
+    public Channel poll() {
+        Channel channel = retryMap.poll();
+        if (channel != null) {
+            channel.close();
+        }
+        return channel;
     }
 
 }

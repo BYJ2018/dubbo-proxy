@@ -29,10 +29,6 @@ public class ConnectionHandler  extends ChannelInboundHandlerAdapter {
 
     private final List<AppInfo> appInfoList;
 
-    private final HashedWheelTimer timer = new HashedWheelTimer();
-
-    private final Map<Channel, AppInfo> map = new ConcurrentHashMap<>(16);
-
     private final List<AppInfo> retryList = new CopyOnWriteArrayList<>();
 
     public ConnectionHandler(List<AppInfo> appInfoList) {
@@ -42,28 +38,54 @@ public class ConnectionHandler  extends ChannelInboundHandlerAdapter {
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         Channel inboundChannel = ctx.channel();
-        for (AppInfo appInfo : appInfoList) {
-            connect(appInfo, inboundChannel);
-        }
+        // 与真实服务建立连接
+        appInfoList.forEach(appInfo -> connect(appInfo, inboundChannel));
+        // 与真实服务的心跳
+        heartBeat();
+        // 与真实服务重试，建立链接
+        retry();
+        ctx.fireChannelActive();
+    }
+
+    /**
+     * 重试队列
+     */
+    private void retry() {
+        new Thread(() -> {
+            ConnectionManager connectionManager = ConnectionManager.getInstance();
+            while (true) {
+                Channel channel = connectionManager.poll();
+                if (channel != null) {
+                    Channel inboundChannel = connectionManager.getInboundChannel(channel);
+                    AppInfo appInfo = connectionManager.getAppInfo(channel);
+                    connect(appInfo, inboundChannel);
+                } else {
+                    try {
+                        TimeUnit.SECONDS.sleep(5);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            }
+        }).start();
+
+    }
+
+    private void heartBeat() {
+        ConnectionManager connectionManager = ConnectionManager.getInstance();
         ScheduledExecutorService scheduledExecutorService = Executors.newScheduledThreadPool(1);
         scheduledExecutorService.scheduleAtFixedRate(() -> {
-            ConnectionManager connectionManager = ConnectionManager.getInstance();
             for (Channel channel : connectionManager.connection()) {
                 ByteBuf buffer = heartbeatPacket();
                 if (channel.isActive()) {
                     log.warn("send heartbeat: {}", channel);
                     channel.writeAndFlush(buffer);
                 } else {
-                    // 重试队列
-                    AppInfo appInfo = map.get(channel);
-                    if (Objects.isNull(appInfo)) {
-                        break;
-                    }
-                    connect(appInfo, inboundChannel);
+                    // 加入重试队列
+                    connectionManager.retryQueue(channel);
                 }
             }
         }, 10, 10, TimeUnit.SECONDS);
-        ctx.fireChannelActive();
     }
 
     @Override
@@ -92,7 +114,7 @@ public class ConnectionHandler  extends ChannelInboundHandlerAdapter {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel socketChannel) throws Exception {
-                        socketChannel.pipeline().addLast(new BackendHandler(inboundChannel));
+                        socketChannel.pipeline().addLast(new BackendHandler());
                     }
                 });
         ChannelFuture channelFuture = b.connect(appInfo.getIp(), appInfo.getPort());
@@ -100,13 +122,12 @@ public class ConnectionHandler  extends ChannelInboundHandlerAdapter {
             if (future.isSuccess()) {
                 log.info("remote {} connect success", inboundChannel.remoteAddress());
                 inboundChannel.read();
+                Channel channel = channelFuture.channel();
                 ConnectionManager connectionManager = ConnectionManager.getInstance();
-                connectionManager.addConnection(appInfo.getName(),channelFuture.channel());
+                connectionManager.addConnection(appInfo, channel, inboundChannel);
             } else {
-                // 暂存,定时重连重连。
-                log.warn("connect fail {}", appInfo);
-                /*inboundChannel.close();*/
-                retryList.add(appInfo);
+                // 如果直接连接失败了，一直进行重试
+                future.channel().eventLoop().schedule(() -> connect(appInfo, inboundChannel), 5, TimeUnit.SECONDS);
             }
         });
     }

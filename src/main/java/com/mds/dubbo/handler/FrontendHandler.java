@@ -53,9 +53,13 @@ public class FrontendHandler extends ChannelInboundHandlerAdapter {
                             if (future.isSuccess()) {
                                 ctx.channel().read();
                             } else {
-                                future.channel().close();
+                                // 重试
+                                connectionManager.retryQueue(future.channel());
                             }
                         });
+                    } else {
+                        // 重试
+                        connectionManager.retryQueue(channel);
                     }
                 } else if (body instanceof BodyHeartBeat) {
                     CompositeByteBuf compositeByteBuf = Unpooled.compositeBuffer();
